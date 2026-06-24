@@ -268,6 +268,91 @@ export function buildSalaryFilter(salaryFilter) {
   };
 }
 
+// ── Fit threshold scoring ───────────────────────────────────────────
+// Zero-token scan scoring is intentionally title/location based. Full JD fit
+// still happens later in evaluation mode after reading the posting.
+
+export function fitBandForScore(score) {
+  if (score >= 90) return 'Apply immediately';
+  if (score >= 80) return 'Apply if interested';
+  if (score >= 70) return 'Optional';
+  return 'Reject';
+}
+
+function locationFitBoost(location) {
+  if (typeof location !== 'string' || location.trim() === '') {
+    return { points: 0, reason: 'location missing' };
+  }
+  const lower = location.toLowerCase();
+  if (/(chicago|waukegan|north chicago|lake county|illinois)/.test(lower)) {
+    return { points: 5, reason: 'target Chicago/Lake County location' };
+  }
+  if (/\bremote\b/.test(lower)) {
+    return { points: 3, reason: 'remote-compatible location' };
+  }
+  return { points: 0, reason: `location: ${normalizeScanScalar(location)}` };
+}
+
+const ROLE_FIT_RULES = [
+  { re: /\bsenior product analyst\b/i, score: 94, label: 'senior product analyst target' },
+  { re: /\bproduct analyst\b/i, score: 90, label: 'product analyst target' },
+  { re: /\banalytics engineer\b/i, score: 90, label: 'analytics engineer target' },
+  { re: /\bexperimentation analyst\b/i, score: 90, label: 'experimentation analyst target' },
+  { re: /\bgrowth analyst\b/i, score: 88, label: 'growth analyst target' },
+  { re: /\bcustomer insights? analyst\b/i, score: 88, label: 'customer insights analyst target' },
+  { re: /\bsenior data analyst\b/i, score: 87, label: 'senior data analyst target' },
+  { re: /\bbi engineer\b|\bbusiness intelligence engineer\b/i, score: 86, label: 'BI engineer target' },
+  { re: /\be-?commerce analyst\b/i, score: 86, label: 'ecommerce analyst target' },
+  { re: /\bdata analyst\b/i, score: 82, label: 'data analyst target' },
+  { re: /\bbi analyst\b|\bbusiness intelligence analyst\b/i, score: 81, label: 'BI analyst target' },
+  { re: /\blifecycle analyst\b|\bretention analyst\b|\brevenue analyst\b/i, score: 80, label: 'adjacent growth analytics target' },
+  { re: /\bmarketing analyst\b|\bdigital analyst\b|\bweb analyst\b/i, score: 76, label: 'adjacent marketing/digital analytics role' },
+  { re: /\bbusiness analyst\b/i, score: 70, label: 'broad business analyst role' },
+  { re: /\banalytics?\b/i, score: 72, label: 'generic analytics role' },
+  { re: /\btableau\b|\blooker\b|\bpower bi\b|\bdbt\b/i, score: 70, label: 'tool-aligned analytics role' },
+];
+
+export function scoreOfferFit(offer) {
+  const title = normalizeScanScalar(offer?.title);
+  const lowerTitle = title.toLowerCase();
+  const reasons = [];
+  const matched = ROLE_FIT_RULES.find(rule => rule.re.test(title));
+  let score = matched ? matched.score : 50;
+  reasons.push(matched ? matched.label : 'no direct target-role title match');
+
+  if (/\bsenior\b|\bsr\.?\b/i.test(title) && !/\bsenior\b/i.test(matched?.label || '')) {
+    score += 3;
+    reasons.push('seniority signal');
+  }
+  if (/\bprincipal\b|\bstaff\b|\blead\b/i.test(title)) {
+    score += 2;
+    reasons.push('senior IC/leadership signal');
+  }
+  if (/\bmanager\b|\bdirector\b|\bhead of\b|\bvp\b/i.test(lowerTitle)) {
+    score -= 10;
+    reasons.push('people-management/title drift penalty');
+  }
+  if (/\bengineer\b/i.test(title) && !/\banalytics engineer\b|\bbi engineer\b|\bbusiness intelligence engineer\b/i.test(title)) {
+    score -= 15;
+    reasons.push('non-analytics engineering title penalty');
+  }
+  if (/\bsales\b|\baccount executive\b|\brecruiter\b|\bintern\b/i.test(title)) {
+    score -= 25;
+    reasons.push('excluded title-family penalty');
+  }
+
+  const location = locationFitBoost(offer?.location);
+  score += location.points;
+  reasons.push(location.reason);
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  return {
+    fitScore: score,
+    fitBand: fitBandForScore(score),
+    fitRationale: reasons.join('; '),
+  };
+}
+
 // ── URL rediscovery (--rediscover-404) ──────────────────────────────
 // When a tracked company's job URL returns 404/410, the role may have just
 // moved to a new URL (Workday/Greenhouse rotate URLs without closing roles).
@@ -477,7 +562,10 @@ export function formatPipelineOffer(offer) {
   const url = sanitizePipelineUrl(offer.url);
   const company = sanitizeMarkdownField(offer.company);
   const title = sanitizeMarkdownField(offer.title);
-  return `- [ ] ${url} | ${company} | ${title}`;
+  const fitScore = Number.isFinite(offer.fitScore) ? `${offer.fitScore}` : '';
+  const fitBand = sanitizeMarkdownField(offer.fitBand || '');
+  const fit = fitScore && fitBand ? ` | Fit ${fitScore} (${fitBand})` : '';
+  return `- [ ] ${url} | ${company} | ${title}${fit}`;
 }
 
 export function formatScanHistoryRow(offer, date, status = 'added') {
@@ -489,7 +577,24 @@ export function formatScanHistoryRow(offer, date, status = 'added') {
     offer.company,
     status,
     offer.location || '',
+    Number.isFinite(offer.fitScore) ? offer.fitScore : '',
+    offer.fitBand || '',
+    offer.fitRationale || '',
   ].map(sanitizeTsvField).join('\t');
+}
+
+function ensureScanHistoryHeader() {
+  const header = 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\tfit_score\tfit_band\tfit_rationale\n';
+  if (!existsSync(SCAN_HISTORY_PATH)) {
+    writeFileSync(SCAN_HISTORY_PATH, header, 'utf-8');
+    return;
+  }
+  const text = readFileSync(SCAN_HISTORY_PATH, 'utf-8');
+  const lines = text.split('\n');
+  const current = lines[0] || '';
+  if (current.split('\t').includes('fit_score')) return;
+  lines[0] = header.trimEnd();
+  writeFileSync(SCAN_HISTORY_PATH, lines.join('\n'), 'utf-8');
 }
 
 export function appendToPipeline(offers) {
@@ -520,14 +625,9 @@ export function appendToPipeline(offers) {
 }
 
 export function appendToScanHistory(offers, date, status = 'added') {
-  // Ensure file + header exist. Location appended as 7th column for non-breaking
-  // backward compat — older scan-history.tsv files with 6 columns still parse fine
-  // since loadSeenUrls only reads column 0. `status` is parameterized so callers
-  // can record verify outcomes (`skipped_expired`, etc.) without the legacy
-  // `(expired)` suffix in `source`.
-  if (!existsSync(SCAN_HISTORY_PATH)) {
-    writeFileSync(SCAN_HISTORY_PATH, 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\n', 'utf-8');
-  }
+  // Ensure file + header exist. Extra fit columns are appended for backward
+  // compatibility — loadSeenUrls only reads columns 0, 1, and 5.
+  ensureScanHistoryHeader();
 
   const lines = offers.map(o => formatScanHistoryRow(o, date, status)).join('\n') + '\n';
 
@@ -793,8 +893,10 @@ async function main() {
   let totalFilteredLocation = 0;
   let totalFilteredSalary = 0;
   let totalFilteredContent = 0;
+  let totalFilteredFit = 0;
   let totalDupes = 0;
   const newOffers = [];
+  const fitRejectedOffers = [];
   const errors = [...resolveErrors];
 
   const tasks = targets.map(company => async () => {
@@ -839,24 +941,36 @@ async function main() {
           totalFilteredContent++;
           continue;
         }
+        const scoredJob = {
+          ...job,
+          ...scoreOfferFit(job),
+        };
+        if (scoredJob.fitScore < 70) {
+          totalFilteredFit++;
+          fitRejectedOffers.push({
+            ...scoredJob,
+            source: sourceName,
+          });
+          continue;
+        }
         if (seenUrls.has(job.url)) {
           totalDupes++;
           continue;
         }
-        const key = `${job.company.toLowerCase()}::${job.title.toLowerCase()}`;
+        const key = `${scoredJob.company.toLowerCase()}::${scoredJob.title.toLowerCase()}`;
         if (seenCompanyRoles.has(key)) {
           totalDupes++;
           continue;
         }
         // Mark as seen to avoid intra-scan dupes
-        seenUrls.add(job.url);
+        seenUrls.add(scoredJob.url);
         seenCompanyRoles.add(key);
         // Tag with the company's careers domain so verify can offer a 404/410
         // rediscovery fallback. A null domain (no careers_url) marks the offer
         // as broad-discovery — ineligible for the fallback, per the issue scope.
         const careersUrlDomain = extractCareersUrlDomain(company.careers_url);
         newOffers.push({
-          ...job,
+          ...scoredJob,
           source: sourceName,
           tracked: Boolean(careersUrlDomain),
           careersUrlDomain,
@@ -893,6 +1007,9 @@ async function main() {
   if (!dryRun && verifiedOffers.length > 0) {
     appendToPipeline(verifiedOffers);
     appendToScanHistory(verifiedOffers, date);
+  }
+  if (!dryRun && fitRejectedOffers.length > 0) {
+    appendToScanHistory(fitRejectedOffers, date, 'skipped_fit');
   }
   // Expired postings — plus the old URLs of migrated offers — are recorded as
   // skipped_expired so subsequent scans dedup-skip the dead URLs.
@@ -937,6 +1054,7 @@ async function main() {
   console.log(`Filtered by location:  ${totalFilteredLocation} removed`);
   console.log(`Filtered by salary:   ${totalFilteredSalary} removed`);
   console.log(`Filtered by content:  ${totalFilteredContent} removed`);
+  console.log(`Filtered by fit:      ${totalFilteredFit} removed`);
   console.log(`Duplicates:            ${totalDupes} skipped`);
   if (historyPolicy.recheckAfterDays != null) {
     console.log(`Recheck eligible:      ${seenUrlState.recheckEligible} old scan-history URL(s)`);
@@ -970,7 +1088,7 @@ async function main() {
   if (verifiedOffers.length > 0) {
     console.log('\nNew offers:');
     for (const o of verifiedOffers) {
-      console.log(`  + ${o.company} | ${o.title} | ${o.location || 'N/A'}`);
+      console.log(`  + ${o.company} | ${o.title} | ${o.location || 'N/A'} | ${o.fitScore} (${o.fitBand})`);
     }
     if (dryRun) {
       console.log('\n(dry run — run without --dry-run to save results)');

@@ -1200,6 +1200,8 @@ try {
     shouldDedupScanHistoryRow,
     formatPipelineOffer,
     formatScanHistoryRow,
+    scoreOfferFit,
+    fitBandForScore,
   } = await import(pathToFileURL(join(ROOT, 'scan.mjs')).href);
 
   const filter = buildLocationFilter({
@@ -1341,21 +1343,25 @@ try {
     title: 'Senior Engineer | Growth\n- [ ] https://evil.example/job | EvilCorp | Injected',
     company: '=ACME\\Corp\t| R&D',
     location: '@Remote\nEU',
+    fitScore: 88,
+    fitBand: 'Apply if interested',
+    fitRationale: 'test rationale',
   };
   const pipelineRow = formatPipelineOffer(hostileOffer);
   const pendingLines = pipelineRow.split('\n').filter(line => /^\s*- \[ \] https?:\/\//.test(line));
   const pipelineFields = pipelineRow.split('|').map(part => part.trim());
   if (
     pendingLines.length === 1 &&
-    pipelineFields.length === 3 &&
+    pipelineFields.length === 4 &&
     pipelineFields[0] === '- [ ] https://jobs.example.com/123%7Cevil' &&
     !pipelineRow.includes('\n') &&
     !pipelineRow.includes('\t') &&
     !pipelineRow.includes('\\|') &&
     pipelineRow.includes('=ACME\\\\Corp / R&D') &&
-    pipelineRow.includes('- \\[ \\] https://evil.example/job / EvilCorp / Injected')
+    pipelineRow.includes('- \\[ \\] https://evil.example/job / EvilCorp / Injected') &&
+    pipelineRow.includes('Fit 88 (Apply if interested)')
   ) {
-    pass('scan pipeline writer preserves row shape without injected checkboxes or extra pipes');
+    pass('scan pipeline writer preserves row shape and fit metadata without injected checkboxes or extra pipes');
   } else {
     fail(`scan pipeline metadata sanitizer produced unsafe row: ${pipelineRow}`);
   }
@@ -1363,16 +1369,38 @@ try {
   const historyRow = formatScanHistoryRow(hostileOffer, '2026-06-18');
   const historyColumns = historyRow.split('\t');
   if (
-    historyColumns.length === 7 &&
+    historyColumns.length === 10 &&
     !historyColumns.some(col => /[\r\n\t]/.test(col)) &&
     historyColumns[0] === 'https://jobs.example.com/123|evil' &&
     historyColumns[3].includes('- [ ] https://evil.example/job') &&
     historyColumns[4] === "'=ACME\\Corp | R&D" &&
-    historyColumns[6] === "'@Remote EU"
+    historyColumns[6] === "'@Remote EU" &&
+    historyColumns[7] === '88' &&
+    historyColumns[8] === 'Apply if interested' &&
+    historyColumns[9] === 'test rationale'
   ) {
-    pass('scan-history writer preserves row shape and neutralizes spreadsheet formulas');
+    pass('scan-history writer preserves row shape, fit metadata, and neutralizes spreadsheet formulas');
   } else {
     fail(`scan-history metadata sanitizer produced unsafe TSV row: ${JSON.stringify(historyColumns)}`);
+  }
+
+  const immediate = scoreOfferFit({ title: 'Senior Product Analyst', location: 'Chicago, Illinois' });
+  const interested = scoreOfferFit({ title: 'Data Analyst', location: 'Remote, United States' });
+  const optional = scoreOfferFit({ title: 'Business Analyst', location: '' });
+  const reject = scoreOfferFit({ title: 'Software Engineer', location: 'Chicago, Illinois' });
+  if (
+    fitBandForScore(90) === 'Apply immediately' &&
+    fitBandForScore(89) === 'Apply if interested' &&
+    fitBandForScore(79) === 'Optional' &&
+    fitBandForScore(69) === 'Reject' &&
+    immediate.fitScore >= 90 &&
+    interested.fitScore >= 80 && interested.fitScore <= 89 &&
+    optional.fitScore >= 70 && optional.fitScore <= 79 &&
+    reject.fitScore < 70
+  ) {
+    pass('scan fit threshold system maps scores to apply decisions');
+  } else {
+    fail(`scan fit threshold scoring unexpected: ${JSON.stringify({ immediate, interested, optional, reject })}`);
   }
 
   // ── content_filter (#734) ──

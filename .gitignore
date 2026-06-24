@@ -67,3 +67,4 @@ package-lock.json
 
 # Planning (local scratchpad)
 plan/
+templates/*.docx

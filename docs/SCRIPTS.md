@@ -233,6 +233,17 @@ Zero-token portal scanner. Runs configured local parsers for SSR/static career p
 
 `scan_history.recheck_after_days` in `portals.yml` lets old `added` URLs become eligible for recheck after the configured number of days. If absent, scan-history dedup keeps the historical behavior and dedups forever. Permanent invalid statuses such as blocked host and malformed URL remain permanent.
 
+Scanned roles that pass title/location/salary/content filters receive a zero-token fit score before they enter the pipeline:
+
+| Fit score | Decision |
+|-----------|----------|
+| 90+ | Apply immediately |
+| 80-89 | Apply if interested |
+| 70-79 | Optional |
+| Below 70 | Reject |
+
+Roles below 70 are recorded in `data/scan-history.tsv` as `skipped_fit` and are not added to `data/pipeline.md`. Scan history rows include `fit_score`, `fit_band`, and `fit_rationale` columns so every scored scan candidate has an auditable triage decision.
+
 For custom SSR pages, configure a tracked company with `scan_method: local_parser` and a `parser` block. The parser can be written in JavaScript, Python, or any language available as a local executable. Company-specific parsers usually already know their source URL and only need to print JSON jobs to stdout:
 
 ```yaml
