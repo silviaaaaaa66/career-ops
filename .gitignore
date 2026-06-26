@@ -43,6 +43,15 @@ modes/_profile.md
 .resolved-prompt-*
 node_modules/
 bun.lock
+
+# Generated apply-mode reports
+reports/opportunities/
+reports/apply-mode.html
+reports/apply-mode.md
+
+# Generated PDFs
+output/*.pdf
+
 # Report-number reservation sentinels (ephemeral, created by reserve-report-num.mjs)
 reports/*-RESERVED.md
 

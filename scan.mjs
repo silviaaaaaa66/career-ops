@@ -207,6 +207,102 @@ export function buildContentFilter(contentFilter) {
   };
 }
 
+// ── Posted date filter ──────────────────────────────────────────────
+// Optional. If `posted_date_filter` is absent from portals.yml, all jobs pass.
+// Applied after content filtering and before dedup/history writes, so stale
+// postings do not occupy scan-history and can reappear if the provider later
+// reports a fresh posted date.
+//
+// Semantics:
+//   - postedAt can be epoch milliseconds, epoch seconds, a Date, or a
+//     Date.parse-compatible string
+//   - max_age_days compares calendar dates in the configured timezone
+//   - missing/unparseable dates follow unknown_date_policy:
+//       flag   → keep job and set posted_date_unknown: true
+//       reject → drop job before dedup/history
+
+function dateKeyInTimeZone(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const byType = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  return `${byType.year}-${byType.month}-${byType.day}`;
+}
+
+function daysBetweenDateKeys(start, end) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) return null;
+  const startDate = new Date(`${start}T00:00:00Z`);
+  const endDate = new Date(`${end}T00:00:00Z`);
+  if (startDate.toISOString().slice(0, 10) !== start || endDate.toISOString().slice(0, 10) !== end) return null;
+  return Math.floor((endDate - startDate) / (1000 * 60 * 60 * 24));
+}
+
+function normalizePostedAt(value) {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null;
+    // Providers should use milliseconds, but tolerate epoch seconds.
+    return Math.abs(value) < 10_000_000_000 ? value * 1000 : value;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
+}
+
+export function buildPostedDateFilter(postedDateFilter, { now = new Date() } = {}) {
+  if (!postedDateFilter) return () => ({ keep: true });
+
+  const maxAgeDays = Number(postedDateFilter.max_age_days);
+  if (!Number.isFinite(maxAgeDays) || maxAgeDays < 0) {
+    console.error('Warning: posted_date_filter.max_age_days must be a non-negative number — posted date filter disabled');
+    return () => ({ keep: true });
+  }
+
+  const unknownDatePolicy = postedDateFilter.unknown_date_policy === 'reject' ? 'reject' : 'flag';
+  let timeZone = typeof postedDateFilter.timezone === 'string' && postedDateFilter.timezone.trim()
+    ? postedDateFilter.timezone.trim()
+    : 'UTC';
+  try {
+    dateKeyInTimeZone(now, timeZone);
+  } catch {
+    console.error(`Warning: posted_date_filter.timezone "${timeZone}" is invalid — using UTC`);
+    timeZone = 'UTC';
+  }
+  const todayKey = dateKeyInTimeZone(now, timeZone);
+
+  return (job) => {
+    const postedMs = normalizePostedAt(job?.postedAt ?? job?.posted_at ?? job?.postedDate ?? job?.posted_date);
+    if (postedMs == null) {
+      return unknownDatePolicy === 'reject'
+        ? { keep: false, reason: 'unknown' }
+        : { keep: true, posted_date_unknown: true };
+    }
+
+    const postedKey = dateKeyInTimeZone(new Date(postedMs), timeZone);
+    const ageDays = daysBetweenDateKeys(postedKey, todayKey);
+    if (ageDays == null) {
+      return unknownDatePolicy === 'reject'
+        ? { keep: false, reason: 'unknown' }
+        : { keep: true, posted_date_unknown: true };
+    }
+
+    return {
+      keep: ageDays <= maxAgeDays,
+      reason: ageDays > maxAgeDays ? 'stale' : undefined,
+      postedDate: postedKey,
+      postedAgeDays: ageDays,
+    };
+  };
+}
+
 // ── Salary filter ───────────────────────────────────────────────────
 // Optional. If `salary_filter` is absent from portals.yml, all salaries pass.
 // Semantics:
@@ -565,10 +661,14 @@ export function formatPipelineOffer(offer) {
   const fitScore = Number.isFinite(offer.fitScore) ? `${offer.fitScore}` : '';
   const fitBand = sanitizeMarkdownField(offer.fitBand || '');
   const fit = fitScore && fitBand ? ` | Fit ${fitScore} (${fitBand})` : '';
-  return `- [ ] ${url} | ${company} | ${title}${fit}`;
+  const postedDateUnknown = offer.posted_date_unknown ? ' | posted_date_unknown' : '';
+  return `- [ ] ${url} | ${company} | ${title}${fit}${postedDateUnknown}`;
 }
 
 export function formatScanHistoryRow(offer, date, status = 'added') {
+  const fitRationale = offer.posted_date_unknown
+    ? [offer.fitRationale, 'posted_date_unknown'].filter(Boolean).join('; ')
+    : offer.fitRationale || '';
   return [
     normalizeScanUrl(offer.url),
     date,
@@ -579,7 +679,7 @@ export function formatScanHistoryRow(offer, date, status = 'added') {
     offer.location || '',
     Number.isFinite(offer.fitScore) ? offer.fitScore : '',
     offer.fitBand || '',
-    offer.fitRationale || '',
+    fitRationale,
   ].map(sanitizeTsvField).join('\t');
 }
 
@@ -821,6 +921,7 @@ async function main() {
   const locationFilter = buildLocationFilter(config.location_filter);
   const salaryFilter = buildSalaryFilter(config.salary_filter);
   const contentFilter = buildContentFilter(config.content_filter);
+  const postedDateFilter = buildPostedDateFilter(config.posted_date_filter);
 
   // 3. Resolve a provider for each enabled company / board
   const targets = [];
@@ -893,13 +994,17 @@ async function main() {
   let totalFilteredLocation = 0;
   let totalFilteredSalary = 0;
   let totalFilteredContent = 0;
+  let totalFilteredPostedDate = 0;
+  let totalFlaggedUnknownDate = 0;
   let totalFilteredFit = 0;
   let totalDupes = 0;
   const newOffers = [];
   const fitRejectedOffers = [];
   const errors = [...resolveErrors];
+  let trackedCompaniesTotalMs = 0;
 
   const tasks = targets.map(company => async () => {
+    const startedAt = Date.now();
     let provider = company._provider;
     const ctx = makeHttpCtx();
     let sourceName = provider.id === 'local-parser' ? 'local-parser' : `${provider.id}-api`;
@@ -941,10 +1046,19 @@ async function main() {
           totalFilteredContent++;
           continue;
         }
+        const postedDateResult = postedDateFilter(job);
+        if (!postedDateResult.keep) {
+          totalFilteredPostedDate++;
+          continue;
+        }
         const scoredJob = {
           ...job,
           ...scoreOfferFit(job),
+          ...(postedDateResult.posted_date_unknown ? { posted_date_unknown: true } : {}),
+          ...(postedDateResult.postedDate ? { postedDate: postedDateResult.postedDate } : {}),
+          ...(Number.isFinite(postedDateResult.postedAgeDays) ? { postedAgeDays: postedDateResult.postedAgeDays } : {}),
         };
+        if (postedDateResult.posted_date_unknown) totalFlaggedUnknownDate++;
         if (scoredJob.fitScore < 70) {
           totalFilteredFit++;
           fitRejectedOffers.push({
@@ -978,10 +1092,18 @@ async function main() {
       }
     } catch (err) {
       errors.push({ company: company.name, error: err.message });
+    } finally {
+      const elapsedMs = Date.now() - startedAt;
+      if (company._isBoard) {
+        console.log(`⏱️ Job board ${company.name} finished in ${(elapsedMs / 1000).toFixed(1)}s`);
+      } else {
+        trackedCompaniesTotalMs += elapsedMs;
+      }
     }
   });
 
   await parallelFetch(tasks, CONCURRENCY);
+  console.log(`⏱️ Tracked companies total: ${(trackedCompaniesTotalMs / 1000).toFixed(1)}s`);
 
   // 5.5. Optional liveness verification — drop expired and guard-rejected postings
   let verifiedOffers = newOffers;
@@ -1054,6 +1176,8 @@ async function main() {
   console.log(`Filtered by location:  ${totalFilteredLocation} removed`);
   console.log(`Filtered by salary:   ${totalFilteredSalary} removed`);
   console.log(`Filtered by content:  ${totalFilteredContent} removed`);
+  console.log(`Filtered by posted:   ${totalFilteredPostedDate} removed`);
+  console.log(`Unknown posted date:  ${totalFlaggedUnknownDate} flagged`);
   console.log(`Filtered by fit:      ${totalFilteredFit} removed`);
   console.log(`Duplicates:            ${totalDupes} skipped`);
   if (historyPolicy.recheckAfterDays != null) {
