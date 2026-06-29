@@ -20,6 +20,7 @@ import { parseArgs } from "util";
 
 const PIPELINE_PATH = "data/pipeline.md";
 const SCAN_HISTORY_PATH = "data/scan-history.tsv";
+const APPLICATIONS_PATH = "data/applications.md";
 const CV_PATH = "cv.md";
 const PROFILE_PATH = "config/profile.yml";
 const PROFILE_NOTES_PATH = "modes/_profile.md";
@@ -28,6 +29,7 @@ const MD_OUT = "reports/apply-mode.md";
 const OPPORTUNITIES_DIR = "reports/opportunities";
 const OPPORTUNITY_RETENTION_DAYS = 3;
 const MIN_FIT_SCORE = 70;
+const APPLY_MODE_FRESHNESS_DAYS = 3;
 const COVER_LETTER_TARGET_MIN = 200;
 const COVER_LETTER_TARGET_MAX = 300;
 const COVER_LETTER_HARD_MAX = 320;
@@ -152,6 +154,155 @@ function parsePipeline(text) {
   }
 
   return jobs.sort((a, b) => b.fitScore - a.fitScore || a.company.localeCompare(b.company));
+}
+
+function parseApplicationsTracker(text) {
+  const applied = new Set();
+  const lines = text.split(/\r?\n/).filter(line => line.trim().startsWith("|"));
+  const headerLine = lines.find(line => /\bCompany\b/i.test(line) && /\bRole\b/i.test(line) && /\bStatus\b/i.test(line));
+  if (!headerLine) return applied;
+
+  const headers = headerLine
+    .split("|")
+    .slice(1, -1)
+    .map(header => header.trim().toLowerCase());
+  const companyIndex = headers.indexOf("company");
+  const roleIndex = headers.indexOf("role");
+  const statusIndex = headers.indexOf("status");
+  if (companyIndex < 0 || roleIndex < 0 || statusIndex < 0) return applied;
+
+  for (const line of lines) {
+    if (line === headerLine || /\|\s*-{3,}\s*\|/.test(line)) continue;
+    const cells = line.split("|").slice(1, -1).map(cell => cell.trim());
+    if (!/^Applied$/i.test(cells[statusIndex] || "")) continue;
+    applied.add(trackerRoleKey(cells[companyIndex], cells[roleIndex]));
+  }
+
+  return applied;
+}
+
+function readAppliedTrackerKeys(path = APPLICATIONS_PATH) {
+  if (!existsSync(path)) return new Set();
+  return parseApplicationsTracker(readFileSync(path, "utf-8"));
+}
+
+function trackerRoleKey(company, title) {
+  return `${normalizeKeyPart(company)}\t${normalizeKeyPart(title)}`;
+}
+
+function normalizeDateValue(value) {
+  if (value == null || value === "") return null;
+  if (value instanceof Date && Number.isFinite(value.getTime())) return localIsoDate(value);
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const ms = value < 10_000_000_000 ? value * 1000 : value;
+    return localIsoDate(new Date(ms));
+  }
+  const raw = String(value).trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? localIsoDate(new Date(parsed)) : null;
+}
+
+function knownDateFromJob(job, row = {}) {
+  for (const value of [
+    job.postedAt,
+    job.posted_at,
+    job.postedDate,
+    job.posted_date,
+    row.postedAt,
+    row.posted_at,
+    row.postedDate,
+    row.posted_date,
+    row.date_posted,
+    row.posted,
+    row.first_seen,
+  ]) {
+    const normalized = normalizeDateValue(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function relativePostedAgeDays(text) {
+  const haystack = String(text || "").toLowerCase();
+  if (/\b(posted\s+)?today\b/.test(haystack)) return 0;
+  if (/\b(posted\s+)?yesterday\b/.test(haystack)) return 1;
+
+  const dayMatch = haystack.match(/\b(?:posted\s+)?(\d+)\s*(?:\+?\s*)days?\s+ago\b/);
+  if (dayMatch) return Number(dayMatch[1]);
+
+  const weekMatch = haystack.match(/\b(?:posted\s+)?(\d+)\s*(?:\+?\s*)weeks?\s+ago\b/);
+  if (weekMatch) return Number(weekMatch[1]) * 7;
+  if (/\b(?:posted\s+)?a\s+week\s+ago\b|\b(?:posted\s+)?1\s+week\s+ago\b/.test(haystack)) return 7;
+
+  return null;
+}
+
+function buildJobSearchText(job, row = {}) {
+  return [
+    job.title,
+    job.company,
+    job.rationale,
+    row.title,
+    row.company,
+    row.location,
+    row.fit_rationale,
+    row.description,
+    row.content,
+    row.summary,
+    row.posted,
+    row.posted_on,
+  ].filter(Boolean).join(" ");
+}
+
+function isFreshForApplyMode(job, row = {}, todayIso = localIsoDate()) {
+  const haystack = buildJobSearchText(job, row);
+  const knownDate = knownDateFromJob(job, row);
+
+  // Apply Mode is a short-list sprint, not a general backlog. When the scanner
+  // gives an exact posted date, keep only roles posted in the last three
+  // calendar days. If provider-specific postedAt was not persisted, first_seen
+  // is used as a conservative freshness signal: anything first seen more than
+  // three days ago is no longer a fresh Apply Mode opportunity.
+  if (knownDate) {
+    return calendarDayDiff(todayIso, knownDate) <= APPLY_MODE_FRESHNESS_DAYS;
+  }
+
+  // Some ATS pages expose only relative labels such as "6 days ago" or
+  // "1 week ago". With no exact date to normalize, reject labels older than
+  // the three-day apply window while allowing today/yesterday/2-3 days ago.
+  const relativeAge = relativePostedAgeDays(haystack);
+  if (relativeAge != null) return relativeAge <= APPLY_MODE_FRESHNESS_DAYS;
+
+  return true;
+}
+
+function isMlHeavyRole(job, row = {}) {
+  const haystack = buildJobSearchText(job, row);
+  const patterns = [
+    /\bmachine learning\b/i,
+    /\bml\b/i,
+    /\bnlp\b/i,
+    /\bnatural language processing\b/i,
+    /\bdeep learning\b/i,
+    /\bcomputer vision\b/i,
+    /\bllm\b/i,
+    /\bgenerative AI\b/i,
+    /\bmodel development\b/i,
+    /\bpredictive modeling\b/i,
+    /\brecommendation algorithm(?:s)?\b/i,
+    /\bdata scientist\b/i,
+    /\bapplied scientist\b/i,
+    /\bresearch scientist\b/i,
+    /\bAI scientist\b/i,
+  ];
+
+  // These are intentionally strong ML/Data Science signals only. Plain
+  // analytics language such as product analytics, experimentation, A/B testing,
+  // BI, analytics engineering, SQL, Tableau, Looker, and dbt should continue
+  // through to scoring and cover-letter generation.
+  return patterns.some(pattern => pattern.test(haystack));
 }
 
 function parseTsvLine(line) {
@@ -402,7 +553,7 @@ function trimClosingLetter(text, maxWords) {
   return `${trimToWords(body, Math.max(allowance, 1))}${signature}`;
 }
 
-function buildHtmlReport(jobs, generatedAt) {
+function buildHtmlReport(jobs, generatedAt, summary) {
   const rows = jobs.map((job, index) => {
     const reasons = job.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("");
     const letter = escapeHtml(job.coverLetter).replace(/\n/g, "<br>");
@@ -468,6 +619,41 @@ function buildHtmlReport(jobs, generatedAt) {
       padding: 20px 24px 44px;
       display: grid;
       gap: 14px;
+    }
+    .summary {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+    .summary h2 {
+      margin-bottom: 10px;
+      font-size: 17px;
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 10px;
+    }
+    .summary-item {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      background: #fbfcfd;
+    }
+    .summary-label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      text-transform: uppercase;
+    }
+    .summary-value {
+      display: block;
+      margin-top: 2px;
+      font-size: 24px;
+      font-weight: 760;
+      color: var(--score);
     }
     .job-card {
       background: var(--panel);
@@ -552,14 +738,24 @@ function buildHtmlReport(jobs, generatedAt) {
     <p class="subhead">Generated ${escapeHtml(generatedAt)}. Review-only: cover letters only, no resume generation, no interview prep, no application submission.</p>
   </header>
   <main>
-    ${rows || "<p>No pending roles with Fit Score >= 70.</p>"}
+    <section class="summary" aria-labelledby="filter-summary">
+      <h2 id="filter-summary">Filter Summary</h2>
+      <div class="summary-grid">
+        <div class="summary-item"><span class="summary-label">Jobs considered</span><span class="summary-value">${summary.jobsConsidered}</span></div>
+        <div class="summary-item"><span class="summary-label">Old postings excluded</span><span class="summary-value">${summary.excludedOldPosting}</span></div>
+        <div class="summary-item"><span class="summary-label">ML/Data Science excluded</span><span class="summary-value">${summary.excludedMlDataScience}</span></div>
+        <div class="summary-item"><span class="summary-label">Already applied excluded</span><span class="summary-value">${summary.excludedAlreadyApplied}</span></div>
+        <div class="summary-item"><span class="summary-label">Included in report</span><span class="summary-value">${summary.includedFinal}</span></div>
+      </div>
+    </section>
+    ${rows || "<p>No eligible pending roles after Apply Mode filters.</p>"}
   </main>
 </body>
 </html>
 `;
 }
 
-function buildMarkdownReport(jobs, generatedAt) {
+function buildMarkdownReport(jobs, generatedAt, summary) {
   const sections = jobs.map((job, index) => {
     const reasons = job.reasons.map(reason => `- ${reason}`).join("\n");
     return `<!-- opportunity-key: ${opportunityKey(job)} -->
@@ -591,9 +787,17 @@ Generated ${generatedAt}.
 
 Review-only report: cover letters only. No tailored resumes, interview prep notes, STAR stories, pipeline status changes, or application submission.
 
+## Filter Summary
+
+- Jobs considered: ${summary.jobsConsidered}
+- Excluded for old posting: ${summary.excludedOldPosting}
+- Excluded for ML/Data Science: ${summary.excludedMlDataScience}
+- Excluded because already applied: ${summary.excludedAlreadyApplied}
+- Included in final Apply Mode report: ${summary.includedFinal}
+
 | # | Job Title | Company | Fit Score | Recommendation | Link |
 |---|-----------|---------|-----------|----------------|------|
-${summaryRows || "| - | No pending roles with Fit Score >= 70 | - | - | - | - |"}
+${summaryRows || "| - | No eligible pending roles after Apply Mode filters | - | - | - | - |"}
 
 ${sections}
 `;
@@ -706,14 +910,40 @@ function main() {
   readRequired(PROFILE_NOTES_PATH);
 
   const scanHistory = parseScanHistory(scanHistoryText);
+  const appliedTrackerKeys = readAppliedTrackerKeys();
   const candidate = extractCandidate(profile, cvText);
   const evidence = buildEvidence(profile, cvText);
   const generatedAt = localIsoDate();
   mkdirSync("reports", { recursive: true });
   mkdirSync(OPPORTUNITIES_DIR, { recursive: true });
   const recentOpportunityKeys = readRecentOpportunityKeys(generatedAt);
+  const summary = {
+    jobsConsidered: 0,
+    excludedOldPosting: 0,
+    excludedMlDataScience: 0,
+    excludedAlreadyApplied: 0,
+    includedFinal: 0,
+  };
   let excludedRecent = 0;
-  let jobs = parsePipeline(pipelineText).map(job => {
+
+  let jobs = parsePipeline(pipelineText).filter(job => {
+    const row = scanHistory.get(job.url) || {};
+    summary.jobsConsidered += 1;
+    const oldPosting = !isFreshForApplyMode(job, row, generatedAt);
+    const mlDataScience = isMlHeavyRole(job, row);
+    const trackerKey = trackerRoleKey(row.company || job.company, row.title || job.title);
+    const alreadyApplied = appliedTrackerKeys.has(trackerKey);
+    if (oldPosting) {
+      summary.excludedOldPosting += 1;
+    }
+    if (mlDataScience) {
+      summary.excludedMlDataScience += 1;
+    }
+    if (alreadyApplied) {
+      summary.excludedAlreadyApplied += 1;
+    }
+    return !oldPosting && !mlDataScience && !alreadyApplied;
+  }).map(job => {
     const row = scanHistory.get(job.url) || {};
     const enriched = {
       ...job,
@@ -736,11 +966,12 @@ function main() {
   });
 
   if (args.limit) jobs = jobs.slice(0, args.limit);
+  summary.includedFinal = jobs.length;
 
   const htmlOpportunityOut = `${OPPORTUNITIES_DIR}/${generatedAt}-opportunities.html`;
   const mdOpportunityOut = `${OPPORTUNITIES_DIR}/${generatedAt}-opportunities.md`;
-  const htmlReport = buildHtmlReport(jobs, generatedAt);
-  const markdownReport = buildMarkdownReport(jobs, generatedAt);
+  const htmlReport = buildHtmlReport(jobs, generatedAt, summary);
+  const markdownReport = buildMarkdownReport(jobs, generatedAt, summary);
   writeFileSync(htmlOpportunityOut, htmlReport, "utf-8");
   writeFileSync(mdOpportunityOut, markdownReport, "utf-8");
   writeFileSync(HTML_OUT, htmlReport, "utf-8");
@@ -750,6 +981,10 @@ function main() {
   console.log(`Today's Apply Mode opportunity report generated.`);
   console.log(`HTML: ${htmlOpportunityOut}`);
   console.log(`Markdown: ${mdOpportunityOut}`);
+  console.log(`Jobs considered: ${summary.jobsConsidered}`);
+  console.log(`Excluded for old posting: ${summary.excludedOldPosting}`);
+  console.log(`Excluded for ML/Data Science: ${summary.excludedMlDataScience}`);
+  console.log(`Excluded because already applied: ${summary.excludedAlreadyApplied}`);
   console.log(`Opportunities included: ${jobs.length}`);
   console.log(`Excluded from previous ${OPPORTUNITY_RETENTION_DAYS} days: ${excludedRecent}`);
   console.log(`Old opportunity report files deleted: ${deletedOldReports}`);
