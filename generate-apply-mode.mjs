@@ -133,12 +133,11 @@ function titleCaseCompany(value) {
 function parsePipeline(text) {
   const jobs = [];
   const seen = new Set();
-  const lineRe = /^-\s+\[\s\]\s+(.+?)\s+\|\s+(.+?)\s+\|\s+(.+?)\s+\|\s+Fit\s+(\d+(?:\.\d+)?)\s+\((.+?)\)\s+[\u2014-]\s+(.+)$/;
 
   for (const line of text.split(/\r?\n/)) {
-    const match = line.match(lineRe);
-    if (!match) continue;
-    const [, url, companyRaw, title, scoreRaw, band, rationale] = match;
+    const parsed = parsePipelineFitLine(line);
+    if (!parsed) continue;
+    const { url, companyRaw, title, scoreRaw, band, rationale } = parsed;
     const score = Number(scoreRaw);
     if (!Number.isFinite(score) || score < MIN_FIT_SCORE) continue;
     if (seen.has(url)) continue;
@@ -154,6 +153,38 @@ function parsePipeline(text) {
   }
 
   return jobs.sort((a, b) => b.fitScore - a.fitScore || a.company.localeCompare(b.company));
+}
+
+function parsePipelineFitLine(line) {
+  const match = line.match(/^-\s+\[\s\]\s+(.+)$/);
+  if (!match) return null;
+
+  const parts = match[1].split("|").map(part => part.trim());
+  if (parts.length < 3) return null;
+
+  const [url, companyRaw] = parts;
+  const legacyFit = (parts[3] || "").match(/^Fit\s+(\d+(?:\.\d+)?)\s+\((.+?)\)\s+[\u2014-]\s+(.+)$/);
+  if (legacyFit) {
+    return {
+      url,
+      companyRaw,
+      title: parts[2],
+      scoreRaw: legacyFit[1],
+      band: legacyFit[2],
+      rationale: legacyFit[3],
+    };
+  }
+
+  const inlineFit = parts[2].match(/^(.*?)\s+-\s+Fit\s+(\d+(?:\.\d+)?)\s+\((.+?)\)\s+[\u2014-]\s+(.+)$/);
+  if (!inlineFit) return null;
+  return {
+    url,
+    companyRaw,
+    title: inlineFit[1].trim(),
+    scoreRaw: inlineFit[2],
+    band: inlineFit[3],
+    rationale: inlineFit[4],
+  };
 }
 
 function parseApplicationsTracker(text) {

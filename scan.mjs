@@ -420,7 +420,7 @@ const ROLE_FIT_RULES = [
   { re: /\bgrowth analyst\b/i, score: 88, label: 'growth analyst target' },
   { re: /\bcustomer insights? analyst\b/i, score: 88, label: 'customer insights analyst target' },
   { re: /\bsenior data analyst\b/i, score: 87, label: 'senior data analyst target' },
-  { re: /\bbi engineer\b|\bbusiness intelligence engineer\b/i, score: 86, label: 'BI engineer target' },
+  { re: /\bbi engineer\b|\bbusiness intelligence engineer\b|\bengineer\b.*\bbusiness intelligence\b|\bbusiness intelligence\b.*\bengineer\b/i, score: 86, label: 'BI engineer target' },
   { re: /\be-?commerce analyst\b/i, score: 86, label: 'ecommerce analyst target' },
   { re: /\bdata analyst\b/i, score: 82, label: 'data analyst target' },
   { re: /\bbi analyst\b|\bbusiness intelligence analyst\b/i, score: 81, label: 'BI analyst target' },
@@ -435,6 +435,16 @@ export function scoreOfferFit(offer) {
   const title = normalizeScanScalar(offer?.title);
   const lowerTitle = title.toLowerCase();
   const reasons = [];
+
+  if (/\b(?:senior|sr\.?)\s+data scientist\b/i.test(title)) {
+    const location = locationFitBoost(offer?.location);
+    return {
+      fitScore: 0,
+      fitBand: fitBandForScore(0),
+      fitRationale: ['senior data scientist title hard block', location.reason].join('; '),
+    };
+  }
+
   const matched = ROLE_FIT_RULES.find(rule => rule.re.test(title));
   let score = matched ? matched.score : 50;
   reasons.push(matched ? matched.label : 'no direct target-role title match');
@@ -451,7 +461,7 @@ export function scoreOfferFit(offer) {
     score -= 10;
     reasons.push('people-management/title drift penalty');
   }
-  if (/\bengineer\b/i.test(title) && !/\banalytics engineer\b|\bbi engineer\b|\bbusiness intelligence engineer\b/i.test(title)) {
+  if (/\bengineer\b/i.test(title) && !/\banalytics engineer\b|\bbi engineer\b|\bbusiness intelligence engineer\b|\bengineer\b.*\bbusiness intelligence\b|\bbusiness intelligence\b.*\bengineer\b/i.test(title)) {
     score -= 15;
     reasons.push('non-analytics engineering title penalty');
   }
