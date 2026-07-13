@@ -17,6 +17,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "fs";
 import yaml from "js-yaml";
 import { parseArgs } from "util";
+import { renderCoverLetterPdf } from "./generate-cover-letter.mjs";
 
 const PIPELINE_PATH = "data/pipeline.md";
 const SCAN_HISTORY_PATH = "data/scan-history.tsv";
@@ -28,11 +29,8 @@ const HTML_OUT = "reports/apply-mode.html";
 const MD_OUT = "reports/apply-mode.md";
 const OPPORTUNITIES_DIR = "reports/opportunities";
 const OPPORTUNITY_RETENTION_DAYS = 3;
-const MIN_FIT_SCORE = 70;
+const APPLY_IMMEDIATELY_MIN_SCORE = 90;
 const APPLY_MODE_FRESHNESS_DAYS = 3;
-const COVER_LETTER_TARGET_MIN = 200;
-const COVER_LETTER_TARGET_MAX = 300;
-const COVER_LETTER_HARD_MAX = 320;
 
 function readRequired(path) {
   if (!existsSync(path)) throw new Error(`Missing required input: ${path}`);
@@ -55,7 +53,7 @@ Usage:
   npm run apply-mode -- --limit 10
 
 Options:
-  --limit <n>  Keep only the top n pending roles after score filtering.
+  --limit <n>  Keep only the top n pending roles in the report.
 `);
     process.exit(0);
   }
@@ -139,7 +137,7 @@ function parsePipeline(text) {
     if (!parsed) continue;
     const { url, companyRaw, title, scoreRaw, band, rationale } = parsed;
     const score = Number(scoreRaw);
-    if (!Number.isFinite(score) || score < MIN_FIT_SCORE) continue;
+    if (!Number.isFinite(score)) continue;
     if (seen.has(url)) continue;
     seen.add(url);
     jobs.push({
@@ -517,7 +515,7 @@ function formatVisa(value) {
     .replace(/\bh-?1b\b/gi, "H-1B");
 }
 
-function generateCoverLetter(job, candidate, archetype, reasons, evidence) {
+function buildCoverLetterPayload(job, candidate, archetype, reasons, evidence, date) {
   const highlights = pickHighlights(archetype);
   const greeting = "Dear Hiring Team,";
   const company = job.company;
@@ -527,67 +525,58 @@ function generateCoverLetter(job, candidate, archetype, reasons, evidence) {
   const visaLine = visa ? ` I would also want to confirm the role's path for ${visa} early in the process.` : "";
   const roleReason = reasons[0] || "Connection to the kind of analytics work I do best";
 
-  const paragraphs = [
-    `${greeting}\n\nI am writing to apply for the ${title} role at ${company}. ${evidence.summary} The role stood out because it is a strong match for ${roleReason.toLowerCase()}.`,
-    ...evidence.conciseParagraphs,
-    `For this ${archetype.toLowerCase()} opportunity, I would emphasize ${highlights[0]}, ${highlights[1]}, and ${highlights[2]}. I am strongest when a team needs clear metric definitions, reliable dashboards, and analysis that helps product, operations, finance, or leadership partners decide what to do next.`,
-    `${locationLine}, and I am focused on roles where I can contribute over the long term while continuing to deepen my analytics craft.${visaLine} I would welcome the chance to discuss how my experience with experimentation, SQL/Python analysis, dashboard automation, and stakeholder decision support could help ${company} move faster with clearer metrics and better decisions.\n\nSincerely,\n${candidate.name}`,
-  ];
-
-  return enforceCoverLetterLength(paragraphs);
+  return {
+    candidate: {
+      name: candidate.name,
+      email: candidate.email,
+      location: candidate.location,
+    },
+    letter: {
+      role_title: title,
+      company,
+      date,
+      greeting,
+      opening: `I am writing to apply for the ${title} role at ${company}. ${evidence.summary} The role stood out because it is a strong match for ${roleReason.toLowerCase()}.`,
+      profile_intro: evidence.conciseParagraphs[0],
+      problems_section: `For this ${archetype.toLowerCase()} opportunity, I would emphasize ${highlights[0]}, ${highlights[1]}, and ${highlights[2]}. I am strongest when a team needs clear metric definitions, reliable dashboards, and analysis that helps partners decide what to do next.`,
+      closing: `${locationLine}, and I am focused on roles where I can contribute over the long term while continuing to deepen my analytics craft.${visaLine} I would welcome the chance to discuss how my experience with experimentation, SQL/Python analysis, dashboard automation, and stakeholder decision support could help ${company} move faster with clearer metrics and better decisions.`,
+    },
+  };
 }
 
-function wordCount(text) {
-  return String(text || "").trim().split(/\s+/).filter(Boolean).length;
+function coverPdfPath(job, date) {
+  return `output/${date}-${slugify(job.company) || "company"}-${slugify(job.title) || "role"}-cover.pdf`;
 }
 
-function enforceCoverLetterLength(paragraphs) {
-  let letter = paragraphs.join("\n\n");
-  if (wordCount(letter) <= COVER_LETTER_TARGET_MAX) return letter;
-
-  const middle = paragraphs.slice(1, -2);
-  const trimmed = [
-    paragraphs[0],
-    ...middle.map((paragraph, index) => trimToWords(paragraph, index === 0 ? 72 : 58)),
-    trimToWords(paragraphs[paragraphs.length - 2], 62),
-    paragraphs[paragraphs.length - 1],
-  ];
-  letter = trimmed.join("\n\n");
-  if (wordCount(letter) <= COVER_LETTER_TARGET_MAX) return letter;
-
-  const compact = [
-    paragraphs[0],
-    trimToWords(paragraphs[1], 58),
-    trimToWords(paragraphs[paragraphs.length - 2], 52),
-    paragraphs[paragraphs.length - 1],
-  ];
-  letter = compact.join("\n\n");
-  if (wordCount(letter) <= COVER_LETTER_HARD_MAX) return letter;
-
-  return trimClosingLetter(letter, COVER_LETTER_TARGET_MAX);
+function coverPdfHref(job, prefix) {
+  return job.coverPdfPath
+    ? `${prefix}${job.coverPdfPath.replace(/^output\//, "")}`
+    : "";
 }
 
-function trimToWords(text, maxWords) {
-  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
-  if (words.length <= maxWords) return String(text || "").trim();
-  const clipped = words.slice(0, maxWords).join(" ");
-  const sentenceEnd = Math.max(clipped.lastIndexOf("."), clipped.lastIndexOf("!"), clipped.lastIndexOf("?"));
-  if (sentenceEnd > clipped.length * 0.55) return clipped.slice(0, sentenceEnd + 1);
-  return `${clipped.replace(/[,:;.-]+$/, "")}.`;
+function shouldGenerateCoverPdf(job) {
+  return job.fitScore >= APPLY_IMMEDIATELY_MIN_SCORE || /^Apply immediately$/i.test(job.band || "");
 }
 
-function trimClosingLetter(text, maxWords) {
-  const signatureMatch = text.match(/\n\nSincerely,\n.+$/);
-  const signature = signatureMatch ? signatureMatch[0] : "";
-  const body = signature ? text.slice(0, -signature.length) : text;
-  const allowance = maxWords - wordCount(signature);
-  return `${trimToWords(body, Math.max(allowance, 1))}${signature}`;
+function coverPdfStatusHtml(job, pdfPathPrefix) {
+  if (job.shouldGenerateCoverPdf && job.coverPdfPath) {
+    return `<a class="pdf-link" href="${escapeHtml(coverPdfHref(job, pdfPathPrefix))}" target="_blank" rel="noopener">Open cover-letter PDF</a>`;
+  }
+  if (job.shouldGenerateCoverPdf) {
+    return `<p class="pdf-error">Cover-letter PDF could not be generated: ${escapeHtml(job.coverPdfError || "Unknown error")}</p>`;
+  }
+  return `<p class="pdf-skipped">Cover-letter PDF skipped for this recommendation.</p>`;
 }
 
-function buildHtmlReport(jobs, generatedAt, summary) {
+function coverPdfStatusMarkdown(job, pdfPathPrefix) {
+  if (job.shouldGenerateCoverPdf && job.coverPdfPath) return `[Open PDF](${coverPdfHref(job, pdfPathPrefix)})`;
+  if (job.shouldGenerateCoverPdf) return `Generation failed: ${job.coverPdfError || "Unknown error"}`;
+  return "Skipped for this recommendation.";
+}
+
+function buildHtmlReport(jobs, generatedAt, summary, pdfPathPrefix) {
   const rows = jobs.map((job, index) => {
     const reasons = job.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("");
-    const letter = escapeHtml(job.coverLetter).replace(/\n/g, "<br>");
     const id = `job-${index + 1}-${slugify(job.company)}`;
     const key = opportunityKey(job);
     return `
@@ -604,10 +593,7 @@ function buildHtmlReport(jobs, generatedAt, summary) {
           <a class="button" href="${escapeHtml(job.url)}" target="_blank" rel="noopener">Open Job</a>
         </div>
         <ul class="reasons">${reasons}</ul>
-        <details>
-          <summary>Cover Letter</summary>
-          <div class="letter">${letter}</div>
-        </details>
+        ${coverPdfStatusHtml(job, pdfPathPrefix)}
       </article>`;
   }).join("\n");
 
@@ -738,23 +724,9 @@ function buildHtmlReport(jobs, generatedAt, summary) {
     .button:hover { background: var(--accent-dark); }
     .reasons { margin: 0 0 12px 18px; padding: 0; color: #273241; }
     .reasons li { margin: 3px 0; }
-    details {
-      border-top: 1px solid var(--line);
-      padding-top: 11px;
-    }
-    summary {
-      cursor: pointer;
-      font-weight: 750;
-      color: var(--accent-dark);
-    }
-    .letter {
-      margin-top: 12px;
-      padding: 14px;
-      background: #fbfcfd;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      white-space: normal;
-    }
+    .pdf-link { font-weight: 750; color: var(--accent-dark); }
+    .pdf-error { color: #9f1d1d; margin: 0; }
+    .pdf-skipped { color: var(--muted); margin: 0; }
     @media (max-width: 680px) {
       header { padding-left: 16px; padding-right: 16px; }
       main { padding: 16px; }
@@ -766,16 +738,16 @@ function buildHtmlReport(jobs, generatedAt, summary) {
 <body>
   <header>
     <h1>Apply Mode Report</h1>
-    <p class="subhead">Generated ${escapeHtml(generatedAt)}. Review-only: cover letters only, no resume generation, no interview prep, no application submission.</p>
+    <p class="subhead">Generated ${escapeHtml(generatedAt)}. All eligible pending roles are shown; cover-letter PDFs are generated only for Apply immediately roles. No application submission.</p>
   </header>
   <main>
     <section class="summary" aria-labelledby="filter-summary">
       <h2 id="filter-summary">Filter Summary</h2>
       <div class="summary-grid">
         <div class="summary-item"><span class="summary-label">Jobs considered</span><span class="summary-value">${summary.jobsConsidered}</span></div>
-        <div class="summary-item"><span class="summary-label">Old postings excluded</span><span class="summary-value">${summary.excludedOldPosting}</span></div>
-        <div class="summary-item"><span class="summary-label">ML/Data Science excluded</span><span class="summary-value">${summary.excludedMlDataScience}</span></div>
-        <div class="summary-item"><span class="summary-label">Already applied excluded</span><span class="summary-value">${summary.excludedAlreadyApplied}</span></div>
+        <div class="summary-item"><span class="summary-label">Old postings flagged</span><span class="summary-value">${summary.flaggedOldPosting}</span></div>
+        <div class="summary-item"><span class="summary-label">ML/Data Science flagged</span><span class="summary-value">${summary.flaggedMlDataScience}</span></div>
+        <div class="summary-item"><span class="summary-label">Already applied flagged</span><span class="summary-value">${summary.flaggedAlreadyApplied}</span></div>
         <div class="summary-item"><span class="summary-label">Included in report</span><span class="summary-value">${summary.includedFinal}</span></div>
       </div>
     </section>
@@ -786,7 +758,7 @@ function buildHtmlReport(jobs, generatedAt, summary) {
 `;
 }
 
-function buildMarkdownReport(jobs, generatedAt, summary) {
+function buildMarkdownReport(jobs, generatedAt, summary, pdfPathPrefix) {
   const sections = jobs.map((job, index) => {
     const reasons = job.reasons.map(reason => `- ${reason}`).join("\n");
     return `<!-- opportunity-key: ${opportunityKey(job)} -->
@@ -802,9 +774,9 @@ function buildMarkdownReport(jobs, generatedAt, summary) {
 
 ${reasons}
 
-**Cover Letter**
+**Cover Letter PDF**
 
-${job.coverLetter}
+${coverPdfStatusMarkdown(job, pdfPathPrefix)}
 `;
   }).join("\n---\n\n");
 
@@ -816,14 +788,14 @@ ${job.coverLetter}
 
 Generated ${generatedAt}.
 
-Review-only report: cover letters only. No tailored resumes, interview prep notes, STAR stories, pipeline status changes, or application submission.
+Review-only report: all eligible pending roles are shown; cover-letter PDFs are generated only for Apply immediately roles. No tailored resumes, interview prep notes, STAR stories, pipeline status changes, or application submission.
 
 ## Filter Summary
 
 - Jobs considered: ${summary.jobsConsidered}
-- Excluded for old posting: ${summary.excludedOldPosting}
-- Excluded for ML/Data Science: ${summary.excludedMlDataScience}
-- Excluded because already applied: ${summary.excludedAlreadyApplied}
+- Flagged for old posting: ${summary.flaggedOldPosting}
+- Flagged for ML/Data Science: ${summary.flaggedMlDataScience}
+- Flagged because already applied: ${summary.flaggedAlreadyApplied}
 - Included in final Apply Mode report: ${summary.includedFinal}
 
 | # | Job Title | Company | Fit Score | Recommendation | Link |
@@ -932,7 +904,7 @@ function cleanupOldOpportunityReports(todayIso) {
   return deleted;
 }
 
-function main() {
+async function main() {
   const args = readCliArgs();
   const pipelineText = readRequired(PIPELINE_PATH);
   const scanHistoryText = readRequired(SCAN_HISTORY_PATH);
@@ -947,35 +919,27 @@ function main() {
   const generatedAt = localIsoDate();
   mkdirSync("reports", { recursive: true });
   mkdirSync(OPPORTUNITIES_DIR, { recursive: true });
-  const recentOpportunityKeys = readRecentOpportunityKeys(generatedAt);
   const summary = {
     jobsConsidered: 0,
-    excludedOldPosting: 0,
-    excludedMlDataScience: 0,
-    excludedAlreadyApplied: 0,
+    flaggedOldPosting: 0,
+    flaggedMlDataScience: 0,
+    flaggedAlreadyApplied: 0,
     includedFinal: 0,
+    pdfGenerated: 0,
+    pdfSkipped: 0,
+    pdfFailed: 0,
   };
-  let excludedRecent = 0;
 
-  let jobs = parsePipeline(pipelineText).filter(job => {
+  let jobs = parsePipeline(pipelineText).map(job => {
     const row = scanHistory.get(job.url) || {};
     summary.jobsConsidered += 1;
     const oldPosting = !isFreshForApplyMode(job, row, generatedAt);
     const mlDataScience = isMlHeavyRole(job, row);
     const trackerKey = trackerRoleKey(row.company || job.company, row.title || job.title);
     const alreadyApplied = appliedTrackerKeys.has(trackerKey);
-    if (oldPosting) {
-      summary.excludedOldPosting += 1;
-    }
-    if (mlDataScience) {
-      summary.excludedMlDataScience += 1;
-    }
-    if (alreadyApplied) {
-      summary.excludedAlreadyApplied += 1;
-    }
-    return !oldPosting && !mlDataScience && !alreadyApplied;
-  }).map(job => {
-    const row = scanHistory.get(job.url) || {};
+    if (oldPosting) summary.flaggedOldPosting += 1;
+    if (mlDataScience) summary.flaggedMlDataScience += 1;
+    if (alreadyApplied) summary.flaggedAlreadyApplied += 1;
     const enriched = {
       ...job,
       company: titleCaseCompany(row.company || job.company),
@@ -986,25 +950,38 @@ function main() {
     };
     enriched.reasons = splitReasons(enriched);
     enriched.archetype = inferArchetype(enriched, row);
-    enriched.coverLetter = generateCoverLetter(enriched, candidate, enriched.archetype, enriched.reasons, evidence);
+    enriched.shouldGenerateCoverPdf = shouldGenerateCoverPdf(enriched);
+    if (enriched.shouldGenerateCoverPdf) enriched.band = "Apply immediately";
     return enriched;
   }).sort((a, b) => b.fitScore - a.fitScore || a.company.localeCompare(b.company));
 
-  jobs = jobs.filter(job => {
-    if (!recentOpportunityKeys.has(opportunityKey(job))) return true;
-    excludedRecent += 1;
-    return false;
-  });
-
   if (args.limit) jobs = jobs.slice(0, args.limit);
+  for (const job of jobs) {
+    if (!job.shouldGenerateCoverPdf) {
+      summary.pdfSkipped += 1;
+      continue;
+    }
+    const outputPath = coverPdfPath(job, generatedAt);
+    try {
+      const payload = buildCoverLetterPayload(job, candidate, job.archetype, job.reasons, evidence, generatedAt);
+      await renderCoverLetterPdf(payload, outputPath);
+      job.coverPdfPath = outputPath;
+      summary.pdfGenerated += 1;
+    } catch (error) {
+      job.coverPdfError = error instanceof Error ? error.message : String(error);
+      summary.pdfFailed += 1;
+    }
+  }
   summary.includedFinal = jobs.length;
 
   const htmlOpportunityOut = `${OPPORTUNITIES_DIR}/${generatedAt}-opportunities.html`;
   const mdOpportunityOut = `${OPPORTUNITIES_DIR}/${generatedAt}-opportunities.md`;
-  const htmlReport = buildHtmlReport(jobs, generatedAt, summary);
-  const markdownReport = buildMarkdownReport(jobs, generatedAt, summary);
-  writeFileSync(htmlOpportunityOut, htmlReport, "utf-8");
-  writeFileSync(mdOpportunityOut, markdownReport, "utf-8");
+  const htmlOpportunityReport = buildHtmlReport(jobs, generatedAt, summary, "../../output/");
+  const markdownOpportunityReport = buildMarkdownReport(jobs, generatedAt, summary, "../../output/");
+  const htmlReport = buildHtmlReport(jobs, generatedAt, summary, "../output/");
+  const markdownReport = buildMarkdownReport(jobs, generatedAt, summary, "../output/");
+  writeFileSync(htmlOpportunityOut, htmlOpportunityReport, "utf-8");
+  writeFileSync(mdOpportunityOut, markdownOpportunityReport, "utf-8");
   writeFileSync(HTML_OUT, htmlReport, "utf-8");
   writeFileSync(MD_OUT, markdownReport, "utf-8");
   const deletedOldReports = cleanupOldOpportunityReports(generatedAt);
@@ -1013,14 +990,20 @@ function main() {
   console.log(`HTML: ${htmlOpportunityOut}`);
   console.log(`Markdown: ${mdOpportunityOut}`);
   console.log(`Jobs considered: ${summary.jobsConsidered}`);
-  console.log(`Excluded for old posting: ${summary.excludedOldPosting}`);
-  console.log(`Excluded for ML/Data Science: ${summary.excludedMlDataScience}`);
-  console.log(`Excluded because already applied: ${summary.excludedAlreadyApplied}`);
+  console.log(`Flagged for old posting: ${summary.flaggedOldPosting}`);
+  console.log(`Flagged for ML/Data Science: ${summary.flaggedMlDataScience}`);
+  console.log(`Flagged because already applied: ${summary.flaggedAlreadyApplied}`);
   console.log(`Opportunities included: ${jobs.length}`);
-  console.log(`Excluded from previous ${OPPORTUNITY_RETENTION_DAYS} days: ${excludedRecent}`);
+  console.log(`Cover-letter PDFs generated: ${summary.pdfGenerated}`);
+  console.log(`Cover-letter PDFs skipped: ${summary.pdfSkipped}`);
+  console.log(`Cover-letter PDF failures: ${summary.pdfFailed}`);
   console.log(`Old opportunity report files deleted: ${deletedOldReports}`);
   console.log(`Legacy HTML alias: ${HTML_OUT}`);
   console.log(`Legacy Markdown alias: ${MD_OUT}`);
 }
 
-main();
+main().catch(error => {
+  console.error("ERROR generating Apply Mode report:");
+  console.error(error.message);
+  process.exit(1);
+});

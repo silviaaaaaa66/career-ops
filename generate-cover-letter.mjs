@@ -147,6 +147,14 @@ export function buildHtml(payload) {
   return html.replace(/\{\{[A-Z_]+\}\}/g, (token) => replacements[token] ?? token);
 }
 
+export async function renderCoverLetterPdf(payload, outputPath) {
+  const { renderHtmlToPdf } = await import("./generate-pdf.mjs");
+  const html = buildHtml(payload);
+  const resolvedOutputPath = resolve(outputPath);
+  mkdirSync(dirname(resolvedOutputPath), { recursive: true });
+  await renderHtmlToPdf(html, resolvedOutputPath, { format: "a4" });
+}
+
 async function main() {
   const { values: args } = parseArgs({
     options: {
@@ -190,13 +198,8 @@ Usage:
 
   if (!existsSync(OUTPUT_ROOT)) mkdirSync(OUTPUT_ROOT, { recursive: true });
 
-  // Imported lazily so buildHtml can be used (and tested) without Playwright.
-  const { renderHtmlToPdf } = await import("./generate-pdf.mjs");
-
   try {
-    const html = buildHtml(payload);
-    const outputPath = resolve(payload.output_path);
-    await renderHtmlToPdf(html, outputPath, { format: "a4" });
+    await renderCoverLetterPdf(payload, payload.output_path);
     console.log(`\nCover letter PDF: ${payload.output_path}`);
   } catch (err) {
     console.error("ERROR generating cover letter PDF:");
