@@ -3925,15 +3925,15 @@ try {
   fail(`update-system SEMVER_RE test crashed: ${e.message}`);
 }
 
-// ── 17. COVER LETTER GREETING BLOCK ─────────────────────────────
+// ── 17. COVER LETTER FORMAT ─────────────────────────────────────
 
-console.log('\n17. Cover letter greeting block');
+console.log('\n17. Cover letter format');
 
 try {
   const { buildHtml } = await import(pathToFileURL(join(ROOT, 'generate-cover-letter.mjs')).href);
 
   const basePayload = {
-    candidate: { name: 'Jane Doe' },
+    candidate: { name: 'Jane Doe', email: 'jane@example.com' },
     letter: {
       role_title: 'Head of Applied AI',
       opening: 'OPENING_MARKER sentence.',
@@ -3941,42 +3941,57 @@ try {
     },
   };
 
-  // (a) greeting present → renders <p class="greeting"> above the opening
+  // (a) greeting is fixed to Dear Hiring Team, above the opening
   const withGreeting = buildHtml({
     ...basePayload,
     letter: { ...basePayload.letter, greeting: 'Dear Hiring Manager,' },
   });
-  const greetingTag = '<p class="greeting">Dear Hiring Manager,</p>';
+  const greetingTag = '<p class="greeting">Dear Hiring Team,</p>';
   const greetingIdx = withGreeting.indexOf(greetingTag);
   const openingIdx = withGreeting.indexOf('OPENING_MARKER');
-  if (greetingIdx !== -1 && openingIdx !== -1 && greetingIdx < openingIdx) {
-    pass('Greeting renders as <p class="greeting"> above the opening');
+  if (greetingIdx !== -1
+      && openingIdx !== -1
+      && greetingIdx < openingIdx
+      && !withGreeting.includes('Dear Hiring Manager,')) {
+    pass('Greeting is fixed to Dear Hiring Team above the opening');
   } else {
     fail(`Greeting block missing or misordered (greeting=${greetingIdx}, opening=${openingIdx})`);
   }
 
-  // greeting text is HTML-escaped
+  // user-supplied greeting text is ignored, so it cannot inject HTML
   const escaped = buildHtml({
     ...basePayload,
     letter: { ...basePayload.letter, greeting: 'Dear <O\'Brien> & "Co",' },
   });
-  if (escaped.includes('Dear &lt;O&#39;Brien&gt; &amp; &quot;Co&quot;,') && !escaped.includes('Dear <O\'Brien>')) {
-    pass('Greeting text is HTML-escaped');
+  if (escaped.includes('<p class="greeting">Dear Hiring Team,</p>')
+      && !escaped.includes('Dear &lt;O&#39;Brien&gt;')
+      && !escaped.includes('Dear <O\'Brien>')) {
+    pass('User-supplied greeting is ignored');
   } else {
-    fail('Greeting text was not HTML-escaped');
+    fail('User-supplied greeting leaked into output');
   }
 
-  // (b) greeting omitted → no salutation, no leftover token (backward compatible)
+  // (b) greeting omitted → defaults to Dear Hiring Team, with no header block
   const withoutGreeting = buildHtml(basePayload);
-  if (!withoutGreeting.includes('class="greeting"')
+  if (withoutGreeting.includes('<p class="greeting">Dear Hiring Team,</p>')
+      && !withoutGreeting.includes('class="name"')
+      && !withoutGreeting.includes('class="contact"')
+      && !withoutGreeting.includes('Cover Letter: Head of Applied AI')
       && !withoutGreeting.includes('{{GREETING_BLOCK}}')
       && withoutGreeting.includes('OPENING_MARKER')) {
-    pass('Omitted greeting leaves no salutation and no leftover token (backward compatible)');
+    pass('Omitted greeting defaults to Dear Hiring Team and omits cover-letter header');
   } else {
-    fail('Omitted greeting did not render cleanly (stray greeting markup or unreplaced token)');
+    fail('Default greeting/header format did not render cleanly');
+  }
+
+  if (withoutGreeting.includes('<p class="signature">Jane Doe<br>jane@example.com</p>')
+      && !withoutGreeting.includes('{{SIGNATURE_BLOCK}}')) {
+    pass('Signature renders candidate name and email in the body flow');
+  } else {
+    fail('Signature block missing, malformed, or unreplaced');
   }
 } catch (e) {
-  fail(`Cover letter greeting test crashed: ${e.message}`);
+  fail(`Cover letter format test crashed: ${e.message}`);
 }
 
 // ── 18. COVER LETTER SINGLE-PASS SUBSTITUTION ───────────────────

@@ -44,39 +44,6 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
-function asUrl(value) {
-  return /^https?:\/\//i.test(value) ? value : `https://${value}`;
-}
-
-function buildContactLine(candidate) {
-  const parts = [];
-  if (candidate.location) parts.push(escapeHtml(candidate.location));
-  if (candidate.email) {
-    const email = escapeHtml(candidate.email);
-    parts.push(`<a href="mailto:${email}">${email}</a>`);
-  }
-  if (candidate.phone) parts.push(escapeHtml(candidate.phone));
-  if (candidate.linkedin) {
-    parts.push(`<a href="${escapeHtml(asUrl(candidate.linkedin))}">LinkedIn</a>`);
-  }
-  if (candidate.github) {
-    const display = candidate.github.replace(/^https?:\/\//, "");
-    parts.push(`<a href="${escapeHtml(asUrl(candidate.github))}">${escapeHtml(display)}</a>`);
-  }
-  return parts.join(" &nbsp;|&nbsp; ");
-}
-
-function buildCredentialsBlock(candidate) {
-  const credentials = candidate.credentials || [];
-  if (!credentials.length) return "";
-  return `<div class="credentials">${credentials.map(escapeHtml).join(" &nbsp;|&nbsp; ")}</div>`;
-}
-
-function buildDateline(letter) {
-  const parts = [letter.company, letter.city, letter.date].filter(Boolean).map(escapeHtml);
-  return parts.join(" &nbsp;&nbsp; ");
-}
-
 function buildAchievementsBlock(achievements) {
   if (!achievements || !achievements.length) return "";
   const items = achievements.map(ach => {
@@ -85,6 +52,12 @@ function buildAchievementsBlock(achievements) {
     return `    <li><b>${lead},</b> ${impact}</li>`;
   }).join("\n");
   return `<ul class="achievements">\n${items}\n  </ul>`;
+}
+
+function buildSignatureBlock(candidate) {
+  const lines = [candidate.name, candidate.email].filter(Boolean).map(escapeHtml);
+  if (!lines.length) return "";
+  return `<p class="signature">${lines.join("<br>")}</p>`;
 }
 
 function buildFootnotesBlock(footnotes) {
@@ -114,9 +87,7 @@ export function buildHtml(payload) {
   const templatePath = resolve(scriptDir, "templates", "cover-letter-template.html");
   let html = readFileSync(templatePath, "utf-8");
 
-  // Optional salutation (e.g. "Dear Jane Smith,"). Omitted -> no salutation,
-  // preserving the original behavior for payloads that don't set it.
-  const greetingBlock = letter.greeting ? `<p class="greeting">${escapeHtml(letter.greeting)}</p>` : "";
+  const greetingBlock = `<p class="greeting">Dear Hiring Team,</p>`;
   const closingBlock = letter.closing ? `<p>${escapeHtml(letter.closing)}</p>` : "";
   const languageClosingBlock = letter.language_closing
     ? `<p class="language-closing">${escapeHtml(letter.language_closing)}</p>`
@@ -125,10 +96,7 @@ export function buildHtml(payload) {
 
   const replacements = {
     "{{NAME}}": escapeHtml(candidate.name),
-    "{{CONTACT_LINE}}": buildContactLine(candidate),
-    "{{CREDENTIALS_BLOCK}}": buildCredentialsBlock(candidate),
     "{{ROLE_TITLE}}": escapeHtml(letter.role_title),
-    "{{DATELINE}}": buildDateline(letter),
     "{{GREETING_BLOCK}}": greetingBlock,
     "{{OPENING}}": escapeHtml(letter.opening),
     "{{PROFILE_INTRO}}": escapeHtml(letter.profile_intro),
@@ -136,6 +104,7 @@ export function buildHtml(payload) {
     "{{PROBLEMS_BLOCK}}": problemsBlock,
     "{{CLOSING_BLOCK}}": closingBlock,
     "{{LANGUAGE_CLOSING_BLOCK}}": languageClosingBlock,
+    "{{SIGNATURE_BLOCK}}": buildSignatureBlock(candidate),
     "{{FOOTNOTES_BLOCK}}": buildFootnotesBlock(letter.footnotes),
   };
 

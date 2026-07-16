@@ -3,8 +3,7 @@
 /**
  * generate-apply-mode.mjs - Review-only apply report for top pending roles.
  *
- * Reads the triage outputs and candidate profile, then writes daily
- * opportunity reports plus legacy aliases:
+ * Reads the triage outputs, then writes daily opportunity reports plus legacy aliases:
  *   - reports/opportunities/YYYY-MM-DD-opportunities.html
  *   - reports/opportunities/YYYY-MM-DD-opportunities.md
  *   - reports/apply-mode.html
@@ -15,21 +14,15 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "fs";
-import yaml from "js-yaml";
 import { parseArgs } from "util";
-import { renderCoverLetterPdf } from "./generate-cover-letter.mjs";
 
 const PIPELINE_PATH = "data/pipeline.md";
 const SCAN_HISTORY_PATH = "data/scan-history.tsv";
 const APPLICATIONS_PATH = "data/applications.md";
-const CV_PATH = "cv.md";
-const PROFILE_PATH = "config/profile.yml";
-const PROFILE_NOTES_PATH = "modes/_profile.md";
 const HTML_OUT = "reports/apply-mode.html";
 const MD_OUT = "reports/apply-mode.md";
 const OPPORTUNITIES_DIR = "reports/opportunities";
 const OPPORTUNITY_RETENTION_DAYS = 3;
-const APPLY_IMMEDIATELY_MIN_SCORE = 90;
 const APPLY_MODE_FRESHNESS_DAYS = 3;
 
 function readRequired(path) {
@@ -330,7 +323,7 @@ function isMlHeavyRole(job, row = {}) {
   // These are intentionally strong ML/Data Science signals only. Plain
   // analytics language such as product analytics, experimentation, A/B testing,
   // BI, analytics engineering, SQL, Tableau, Looker, and dbt should continue
-  // through to scoring and cover-letter generation.
+  // through to scoring.
   return patterns.some(pattern => pattern.test(haystack));
 }
 
@@ -418,163 +411,7 @@ function inferArchetype(job, row = {}) {
   return "Remote global";
 }
 
-function pickHighlights(archetype) {
-  const shared = {
-    "Local stable": [
-      "commitment to building a long-term analytics career in the Chicago and North Chicago area",
-      "SQL, Tableau, and stakeholder-ready reporting experience across traditional business teams",
-      "experience turning operational and customer data into decisions leaders can use",
-    ],
-    Insurance: [
-      "American Family Insurance experience across customer journey, operations, dashboards, forecasting, and reporting",
-      "ability to translate insurance and customer service data into clear business recommendations",
-      "SQL, Tableau, AWS, and Python experience in regulated, stakeholder-heavy environments",
-    ],
-    AI: [
-      "product analytics foundation for understanding usage, activation, retention, and feature impact",
-      "experimentation and dashboarding experience that helps product teams make faster decisions",
-      "Python and SQL depth for turning messy behavioral data into practical insights",
-    ],
-    Ecommerce: [
-      "Chewy ecommerce analytics experience across A/B testing, funnel behavior, and product decisions",
-      "hands-on experimentation work that improved conversion, navigation, and test readout speed",
-      "SQL, Python, Tableau, Optimizely, and stakeholder communication across product teams",
-    ],
-    Nonprofit: [
-      "practical dashboarding and reporting experience for non-technical decision makers",
-      "ability to connect mission, program, customer, and operational metrics into usable recommendations",
-      "clear communication style and repeatable analytics workflows",
-    ],
-    "Remote global": [
-      "independent analytics work with distributed stakeholders and clear written communication",
-      "SQL, Python, Tableau, and dashboarding experience that supports repeatable decision workflows",
-      "product, ecommerce, customer, and business analytics range across several operating contexts",
-    ],
-  };
-  return shared[archetype] ?? shared["Remote global"];
-}
-
-function extractCandidate(profile, cvText) {
-  const candidate = profile?.candidate ?? {};
-  const narrative = profile?.narrative ?? {};
-  const skills = narrative?.skills ?? {};
-  const name = candidate.full_name || cvText.split(/\r?\n/).find(Boolean) || "Candidate";
-  return {
-    name,
-    email: candidate.email || "",
-    location: String(candidate.location || profile?.location?.city || "").replace(/NorthChicago/gi, "North Chicago"),
-    headline: narrative.headline || "Senior analytics professional specializing in product analytics, experimentation, and business decision support.",
-    visa: profile?.location?.visa_status || "",
-    targetLocations: profile?.location?.target_locations || [],
-    coreSkills: [
-      ...(skills.core || []),
-      ...(skills.analytics || []),
-      ...(skills.tools || []),
-    ].filter(Boolean),
-  };
-}
-
-function buildEvidence(profile, cvText) {
-  const lower = cvText.toLowerCase();
-  const hasChewy = lower.includes("chewy");
-  const hasAmericanFamily = lower.includes("american family");
-  const skills = profile?.narrative?.skills || {};
-  const coreSkills = [
-    ...(skills.core || []),
-    ...(skills.analytics || []),
-    ...(skills.tools || []),
-  ].filter(Boolean).slice(0, 10);
-
-  const paragraphs = [];
-  const conciseParagraphs = [];
-  let summary = "My background is in product analytics, experimentation, business intelligence, and customer analytics.";
-  if (hasChewy) {
-    paragraphs.push("At Chewy, I worked as a Senior E-Commerce Analyst supporting product and experimentation teams. I built a self-service app A/B test dashboard and ETL pipeline with Tableau, SQL, and AWS that moved test readouts from a two-week cycle to next day and removed about 50 hours of manual analysis each month. I also led analytics for a multi-phase navigation optimization initiative across five A/B tests, using SQL, Python, Tableau, and statistical analysis to support rollout decisions that improved conversion and navigation behavior.");
-    conciseParagraphs.push("At Chewy, I supported product and experimentation teams as a Senior E-Commerce Analyst. I built a Tableau, SQL, and AWS app A/B test dashboard that moved readouts from two weeks to next day and removed about 50 hours of manual analysis each month.");
-  }
-  if (hasAmericanFamily) {
-    paragraphs.push("Before Chewy, I spent several years at American Family Insurance as a Business Analytics Analyst. That work gave me a strong operating foundation in customer journey analysis, call center performance, automated Tableau reporting, AWS-based ETL, forecasting, and stakeholder communication. I learned how to make analytics useful for both technical and non-technical partners, especially when the business question is ambiguous and the data needs structure before it can support a decision.");
-    conciseParagraphs.push("Earlier at American Family Insurance, I worked on customer journey analytics, call center performance, automated Tableau reporting, AWS-based ETL, forecasting, and stakeholder communication. That experience helps me translate messy business questions into practical metrics and clear recommendations.");
-  }
-  if (!paragraphs.length) {
-    paragraphs.push(`My CV shows a strong analytics foundation across ${coreSkills.join(", ") || "SQL, Python, dashboarding, experimentation, and stakeholder communication"}. I would bring that mix of technical analysis and business communication to the role, with an emphasis on useful metrics, clear reporting, and decision-ready recommendations.`);
-    conciseParagraphs.push(`My CV shows a strong analytics foundation across ${coreSkills.join(", ") || "SQL, Python, dashboarding, experimentation, and stakeholder communication"}. I would bring that mix of technical analysis and business communication to the role.`);
-  } else if (hasChewy && hasAmericanFamily) {
-    summary = "My background is in product analytics, experimentation, business intelligence, and customer analytics, with recent experience at Chewy and prior analytics work at American Family Insurance.";
-  } else if (hasChewy) {
-    summary = "My background is in product analytics, experimentation, business intelligence, and customer analytics, with recent experience at Chewy.";
-  } else if (hasAmericanFamily) {
-    summary = "My background is in business analytics, customer analytics, dashboarding, and forecasting, with analytics experience at American Family Insurance.";
-  }
-  return { summary, paragraphs, conciseParagraphs };
-}
-
-function formatVisa(value) {
-  return String(value || "")
-    .replace(/\bh1b\b/gi, "H-1B")
-    .replace(/\bh-?1b\b/gi, "H-1B");
-}
-
-function buildCoverLetterPayload(job, candidate, archetype, reasons, evidence, date) {
-  const highlights = pickHighlights(archetype);
-  const greeting = "Dear Hiring Team,";
-  const company = job.company;
-  const title = job.title;
-  const locationLine = candidate.location ? `I am based in ${candidate.location}` : "I am based in the United States";
-  const visa = formatVisa(candidate.visa);
-  const visaLine = visa ? ` I would also want to confirm the role's path for ${visa} early in the process.` : "";
-  const roleReason = reasons[0] || "Connection to the kind of analytics work I do best";
-
-  return {
-    candidate: {
-      name: candidate.name,
-      email: candidate.email,
-      location: candidate.location,
-    },
-    letter: {
-      role_title: title,
-      company,
-      date,
-      greeting,
-      opening: `I am writing to apply for the ${title} role at ${company}. ${evidence.summary} The role stood out because it is a strong match for ${roleReason.toLowerCase()}.`,
-      profile_intro: evidence.conciseParagraphs[0],
-      problems_section: `For this ${archetype.toLowerCase()} opportunity, I would emphasize ${highlights[0]}, ${highlights[1]}, and ${highlights[2]}. I am strongest when a team needs clear metric definitions, reliable dashboards, and analysis that helps partners decide what to do next.`,
-      closing: `${locationLine}, and I am focused on roles where I can contribute over the long term while continuing to deepen my analytics craft.${visaLine} I would welcome the chance to discuss how my experience with experimentation, SQL/Python analysis, dashboard automation, and stakeholder decision support could help ${company} move faster with clearer metrics and better decisions.`,
-    },
-  };
-}
-
-function coverPdfPath(job, date) {
-  return `output/${date}-${slugify(job.company) || "company"}-${slugify(job.title) || "role"}-cover.pdf`;
-}
-
-function coverPdfHref(job, prefix) {
-  return job.coverPdfPath
-    ? `${prefix}${job.coverPdfPath.replace(/^output\//, "")}`
-    : "";
-}
-
-function shouldGenerateCoverPdf(job) {
-  return job.fitScore >= APPLY_IMMEDIATELY_MIN_SCORE || /^Apply immediately$/i.test(job.band || "");
-}
-
-function coverPdfStatusHtml(job, pdfPathPrefix) {
-  if (job.shouldGenerateCoverPdf && job.coverPdfPath) {
-    return `<a class="pdf-link" href="${escapeHtml(coverPdfHref(job, pdfPathPrefix))}" target="_blank" rel="noopener">Open cover-letter PDF</a>`;
-  }
-  if (job.shouldGenerateCoverPdf) {
-    return `<p class="pdf-error">Cover-letter PDF could not be generated: ${escapeHtml(job.coverPdfError || "Unknown error")}</p>`;
-  }
-  return `<p class="pdf-skipped">Cover-letter PDF skipped for this recommendation.</p>`;
-}
-
-function coverPdfStatusMarkdown(job, pdfPathPrefix) {
-  if (job.shouldGenerateCoverPdf && job.coverPdfPath) return `[Open PDF](${coverPdfHref(job, pdfPathPrefix)})`;
-  if (job.shouldGenerateCoverPdf) return `Generation failed: ${job.coverPdfError || "Unknown error"}`;
-  return "Skipped for this recommendation.";
-}
-
-function buildHtmlReport(jobs, generatedAt, summary, pdfPathPrefix) {
+function buildHtmlReport(jobs, generatedAt, summary) {
   const rows = jobs.map((job, index) => {
     const reasons = job.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join("");
     const id = `job-${index + 1}-${slugify(job.company)}`;
@@ -593,7 +430,7 @@ function buildHtmlReport(jobs, generatedAt, summary, pdfPathPrefix) {
           <a class="button" href="${escapeHtml(job.url)}" target="_blank" rel="noopener">Open Job</a>
         </div>
         <ul class="reasons">${reasons}</ul>
-        ${coverPdfStatusHtml(job, pdfPathPrefix)}
+        <p class="pdf-skipped">Cover letter not generated automatically. Use cover mode for a specific role after review.</p>
       </article>`;
   }).join("\n");
 
@@ -738,7 +575,7 @@ function buildHtmlReport(jobs, generatedAt, summary, pdfPathPrefix) {
 <body>
   <header>
     <h1>Apply Mode Report</h1>
-    <p class="subhead">Generated ${escapeHtml(generatedAt)}. All eligible pending roles are shown; cover-letter PDFs are generated only for Apply immediately roles. No application submission.</p>
+    <p class="subhead">Generated ${escapeHtml(generatedAt)}. All eligible pending roles are shown. No cover letters, tailored resumes, or application submissions are generated automatically.</p>
   </header>
   <main>
     <section class="summary" aria-labelledby="filter-summary">
@@ -758,7 +595,7 @@ function buildHtmlReport(jobs, generatedAt, summary, pdfPathPrefix) {
 `;
 }
 
-function buildMarkdownReport(jobs, generatedAt, summary, pdfPathPrefix) {
+function buildMarkdownReport(jobs, generatedAt, summary) {
   const sections = jobs.map((job, index) => {
     const reasons = job.reasons.map(reason => `- ${reason}`).join("\n");
     return `<!-- opportunity-key: ${opportunityKey(job)} -->
@@ -774,9 +611,9 @@ function buildMarkdownReport(jobs, generatedAt, summary, pdfPathPrefix) {
 
 ${reasons}
 
-**Cover Letter PDF**
+**Cover Letter**
 
-${coverPdfStatusMarkdown(job, pdfPathPrefix)}
+Not generated automatically. Use cover mode for a specific role after review.
 `;
   }).join("\n---\n\n");
 
@@ -788,7 +625,7 @@ ${coverPdfStatusMarkdown(job, pdfPathPrefix)}
 
 Generated ${generatedAt}.
 
-Review-only report: all eligible pending roles are shown; cover-letter PDFs are generated only for Apply immediately roles. No tailored resumes, interview prep notes, STAR stories, pipeline status changes, or application submission.
+Review-only report: all eligible pending roles are shown. No cover letters, tailored resumes, interview prep notes, STAR stories, pipeline status changes, or application submission are generated automatically.
 
 ## Filter Summary
 
@@ -908,14 +745,9 @@ async function main() {
   const args = readCliArgs();
   const pipelineText = readRequired(PIPELINE_PATH);
   const scanHistoryText = readRequired(SCAN_HISTORY_PATH);
-  const cvText = readRequired(CV_PATH);
-  const profile = yaml.load(readRequired(PROFILE_PATH)) || {};
-  readRequired(PROFILE_NOTES_PATH);
 
   const scanHistory = parseScanHistory(scanHistoryText);
   const appliedTrackerKeys = readAppliedTrackerKeys();
-  const candidate = extractCandidate(profile, cvText);
-  const evidence = buildEvidence(profile, cvText);
   const generatedAt = localIsoDate();
   mkdirSync("reports", { recursive: true });
   mkdirSync(OPPORTUNITIES_DIR, { recursive: true });
@@ -925,9 +757,6 @@ async function main() {
     flaggedMlDataScience: 0,
     flaggedAlreadyApplied: 0,
     includedFinal: 0,
-    pdfGenerated: 0,
-    pdfSkipped: 0,
-    pdfFailed: 0,
   };
 
   let jobs = parsePipeline(pipelineText).map(job => {
@@ -950,36 +779,18 @@ async function main() {
     };
     enriched.reasons = splitReasons(enriched);
     enriched.archetype = inferArchetype(enriched, row);
-    enriched.shouldGenerateCoverPdf = shouldGenerateCoverPdf(enriched);
-    if (enriched.shouldGenerateCoverPdf) enriched.band = "Apply immediately";
     return enriched;
   }).sort((a, b) => b.fitScore - a.fitScore || a.company.localeCompare(b.company));
 
   if (args.limit) jobs = jobs.slice(0, args.limit);
-  for (const job of jobs) {
-    if (!job.shouldGenerateCoverPdf) {
-      summary.pdfSkipped += 1;
-      continue;
-    }
-    const outputPath = coverPdfPath(job, generatedAt);
-    try {
-      const payload = buildCoverLetterPayload(job, candidate, job.archetype, job.reasons, evidence, generatedAt);
-      await renderCoverLetterPdf(payload, outputPath);
-      job.coverPdfPath = outputPath;
-      summary.pdfGenerated += 1;
-    } catch (error) {
-      job.coverPdfError = error instanceof Error ? error.message : String(error);
-      summary.pdfFailed += 1;
-    }
-  }
   summary.includedFinal = jobs.length;
 
   const htmlOpportunityOut = `${OPPORTUNITIES_DIR}/${generatedAt}-opportunities.html`;
   const mdOpportunityOut = `${OPPORTUNITIES_DIR}/${generatedAt}-opportunities.md`;
-  const htmlOpportunityReport = buildHtmlReport(jobs, generatedAt, summary, "../../output/");
-  const markdownOpportunityReport = buildMarkdownReport(jobs, generatedAt, summary, "../../output/");
-  const htmlReport = buildHtmlReport(jobs, generatedAt, summary, "../output/");
-  const markdownReport = buildMarkdownReport(jobs, generatedAt, summary, "../output/");
+  const htmlOpportunityReport = buildHtmlReport(jobs, generatedAt, summary);
+  const markdownOpportunityReport = buildMarkdownReport(jobs, generatedAt, summary);
+  const htmlReport = buildHtmlReport(jobs, generatedAt, summary);
+  const markdownReport = buildMarkdownReport(jobs, generatedAt, summary);
   writeFileSync(htmlOpportunityOut, htmlOpportunityReport, "utf-8");
   writeFileSync(mdOpportunityOut, markdownOpportunityReport, "utf-8");
   writeFileSync(HTML_OUT, htmlReport, "utf-8");
@@ -994,9 +805,7 @@ async function main() {
   console.log(`Flagged for ML/Data Science: ${summary.flaggedMlDataScience}`);
   console.log(`Flagged because already applied: ${summary.flaggedAlreadyApplied}`);
   console.log(`Opportunities included: ${jobs.length}`);
-  console.log(`Cover-letter PDFs generated: ${summary.pdfGenerated}`);
-  console.log(`Cover-letter PDFs skipped: ${summary.pdfSkipped}`);
-  console.log(`Cover-letter PDF failures: ${summary.pdfFailed}`);
+  console.log(`Cover-letter PDFs generated: 0 (disabled for Apply Mode reports)`);
   console.log(`Old opportunity report files deleted: ${deletedOldReports}`);
   console.log(`Legacy HTML alias: ${HTML_OUT}`);
   console.log(`Legacy Markdown alias: ${MD_OUT}`);
