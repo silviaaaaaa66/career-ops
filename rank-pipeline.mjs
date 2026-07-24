@@ -4,19 +4,22 @@
  * rank-pipeline.mjs — score and sort data/pipeline.md Pending roles.
  *
  * By default this runs the full triage workflow: fill missing locations,
- * evaluate Data Scientist JDs for ML-heavy keywords, rank Pending, and move
- * Fit 0 rejects to Processed. Use --fast for the old local-only sort.
+ * read JDs for A/B-testing bonuses and Data Scientist ML-heavy exclusions,
+ * rank Pending, and move Fit 0 rejects to Processed. Use --fast for the old
+ * local-only sort.
  * It never creates reports, generates PDFs, updates tracker rows, or submits
  * applications.
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { parseArgs } from 'util';
-import { scoreOfferFit } from './scan.mjs';
+import { fitBandForScore, scoreOfferFit } from './scan.mjs';
 
 const PIPELINE_PATH = 'data/pipeline.md';
 const JD_FETCH_TIMEOUT_MS = 12000;
 const LOCATION_FETCH_TIMEOUT_MS = 12000;
+const AB_TESTING_BONUS = 20;
+const AB_TESTING_RE = /\bA\s*[\/-]\s*B\s+tests?(?:ing)?\b/i;
 const DATA_SCIENTIST_ML_KEYWORDS = [
   'nlp',
   'ml',
@@ -50,8 +53,9 @@ Options:
   --fast         Old local-only sort: no location fill, no JD fetch, no move.
   --no-move-rejects
                  Keep Fit 0 rejects in Pending after ranking.
-  --evaluate-jd  Fetch JDs only for non-Product Data Scientist roles and reject
-                 ML/LLM/algorithm-heavy postings. Enabled by default unless --fast.
+  --evaluate-jd  Fetch JDs for a +20 A/B-testing bonus and reject ML/LLM/
+                 algorithm-heavy Data Scientist postings. Enabled by default
+                 unless --fast.
   --fill-location
                  Fill missing locations from title hints, Workday URLs, or
                  fetched posting details. Enabled by default unless --fast.
@@ -207,6 +211,10 @@ function findMlHeavyKeyword(text) {
     const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp(`\\b${escaped}\\b`, 'i').test(lower);
   }) || null;
+}
+
+function hasAbTestingKeyword(text) {
+  return AB_TESTING_RE.test(String(text || ''));
 }
 
 function hasMissingLocation(location) {
@@ -454,24 +462,40 @@ async function fillOfferLocation(offer, opts = {}) {
 }
 
 async function evaluateDataScientistJd(offer, fetchText = fetchJdText) {
-  if (!shouldEvaluateDataScientistJd(offer.title)) return offer;
+  const isDataScientist = shouldEvaluateDataScientistJd(offer.title);
 
   try {
     const jdText = await fetchText(offer.url);
-    const keyword = findMlHeavyKeyword(jdText);
-    if (!keyword) {
+    if (isDataScientist) {
+      const keyword = findMlHeavyKeyword(jdText);
+      if (keyword) {
+        return {
+          ...offer,
+          fitScore: 0,
+          fitBand: 'Reject',
+          fitRationale: `${offer.fitRationale}; data scientist JD hard reject: mentions "${keyword}"`,
+        };
+      }
+    }
+
+    if (hasAbTestingKeyword(jdText)) {
+      const fitScore = Math.min(100, offer.fitScore + AB_TESTING_BONUS);
       return {
         ...offer,
-        fitRationale: `${offer.fitRationale}; data scientist JD checked: no ML/LLM/algorithm-heavy keyword found`,
+        fitScore,
+        fitBand: fitBandForScore(fitScore),
+        fitRationale: `${offer.fitRationale}; A/B testing JD bonus +${AB_TESTING_BONUS}`,
       };
     }
+
+    if (!isDataScientist) return offer;
+
     return {
       ...offer,
-      fitScore: 0,
-      fitBand: 'Reject',
-      fitRationale: `${offer.fitRationale}; data scientist JD hard reject: mentions "${keyword}"`,
+      fitRationale: `${offer.fitRationale}; data scientist JD checked: no ML/LLM/algorithm-heavy keyword found`,
     };
   } catch (err) {
+    if (!isDataScientist) return offer;
     return {
       ...offer,
       fitRationale: `${offer.fitRationale}; data scientist JD not readable: ${sanitizeCell(err.message)}; needs manual review`,
@@ -687,6 +711,7 @@ export {
   fetchLocation,
   fillOfferLocation,
   findMlHeavyKeyword,
+  hasAbTestingKeyword,
   locationPolicyDecision,
   locationFromWorkdayUrl,
   parsePendingOffer,
