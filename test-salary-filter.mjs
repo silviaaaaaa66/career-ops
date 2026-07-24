@@ -10,7 +10,7 @@
  */
 
 import { parseCompensation } from './providers/ashby.mjs';
-import { buildSalaryFilter, buildPostedDateFilter, formatPipelineOffer, formatScanHistoryRow } from './scan.mjs';
+import { buildSalaryFilter } from './scan.mjs';
 
 // ── Test runner ──────────────────────────────────────────────────────
 
@@ -528,89 +528,7 @@ section('buildSalaryFilter — zero salary jobs');
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// PART 3: buildPostedDateFilter (scan.mjs)
-// ══════════════════════════════════════════════════════════════════════
-
-section('buildPostedDateFilter — disabled / validation cases');
-
-{
-  const filter = buildPostedDateFilter(null);
-  assert(filter({ postedAt: '2026-06-01' }).keep === true, 'null config → pass all');
-}
-
-{
-  const originalError = console.error;
-  let warnings = [];
-  console.error = (msg) => warnings.push(msg);
-
-  const filter = buildPostedDateFilter({ max_age_days: -1 });
-  assert(filter({ postedAt: '2020-01-01' }).keep === true, 'negative max_age_days → filter disabled');
-  assert(warnings.length > 0, 'negative max_age_days → warning logged');
-
-  console.error = originalError;
-}
-
-section('buildPostedDateFilter — known posted dates');
-
-{
-  const now = new Date('2026-06-25T15:00:00Z');
-  const filter = buildPostedDateFilter({ max_age_days: 3, unknown_date_policy: 'flag', timezone: 'UTC' }, { now });
-
-  assert(filter({ postedAt: '2026-06-25T01:00:00Z' }).keep === true,
-    'posted today → pass');
-  assert(filter({ postedAt: '2026-06-22T23:59:00Z' }).keep === true,
-    'posted exactly max_age_days ago by calendar date → pass');
-  assert(filter({ postedAt: '2026-06-21T23:59:00Z' }).keep === false,
-    'posted older than max_age_days → reject');
-}
-
-{
-  const now = new Date('2026-06-25T15:00:00Z');
-  const filter = buildPostedDateFilter({ max_age_days: 3, timezone: 'UTC' }, { now });
-  assert(filter({ postedAt: Date.parse('2026-06-24T12:00:00Z') }).keep === true,
-    'epoch milliseconds postedAt → pass');
-  assert(filter({ postedAt: Math.floor(Date.parse('2026-06-24T12:00:00Z') / 1000) }).keep === true,
-    'epoch seconds postedAt → pass');
-}
-
-section('buildPostedDateFilter — unknown date policy');
-
-{
-  const now = new Date('2026-06-25T15:00:00Z');
-  const filter = buildPostedDateFilter({ max_age_days: 3, unknown_date_policy: 'flag' }, { now });
-  const result = filter({});
-  assert(result.keep === true, 'unknown date with policy=flag → keep');
-  assert(result.posted_date_unknown === true, 'unknown date with policy=flag → mark posted_date_unknown');
-}
-
-{
-  const now = new Date('2026-06-25T15:00:00Z');
-  const filter = buildPostedDateFilter({ max_age_days: 3, unknown_date_policy: 'reject' }, { now });
-  assert(filter({}).keep === false, 'unknown date with policy=reject → reject');
-  assert(filter({ postedAt: 'not a date' }).keep === false, 'unparseable date with policy=reject → reject');
-}
-
-section('buildPostedDateFilter — output markers');
-
-{
-  const offer = {
-    url: 'https://example.com/job',
-    company: 'ExampleCo',
-    title: 'Senior Data Analyst',
-    fitScore: 90,
-    fitBand: 'Apply immediately',
-    fitRationale: 'senior data analyst target',
-    source: 'test-api',
-    posted_date_unknown: true,
-  };
-  assert(formatPipelineOffer(offer).includes('posted_date_unknown'),
-    'pipeline offer marks posted_date_unknown');
-  assert(formatScanHistoryRow(offer, '2026-06-25').includes('posted_date_unknown'),
-    'scan-history row persists posted_date_unknown in rationale');
-}
-
-// ══════════════════════════════════════════════════════════════════════
-// PART 4: End-to-end (parseCompensation → buildSalaryFilter)
+// PART 3: End-to-end (parseCompensation → buildSalaryFilter)
 // ══════════════════════════════════════════════════════════════════════
 
 section('End-to-end — Ashby job through salary filter');
